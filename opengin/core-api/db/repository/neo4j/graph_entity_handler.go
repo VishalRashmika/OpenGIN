@@ -191,6 +191,9 @@ func validateGraphEntityCreation(entity *pb.Entity) error {
 	if entity.Kind == nil || strings.TrimSpace(entity.Kind.GetMajor()) == "" || entity.Kind.GetMinor() == "" {
 		return fmt.Errorf("missing required fields for Neo4j entity creation: missing or blank Kind.Major or Kind.Minor for entity %s", entity.Id)
 	}
+	if err := validateCypherName(entity.Kind.GetMajor()); err != nil {
+		return fmt.Errorf("invalid Kind.Major for entity %s: %w", entity.Id, err)
+	}
 	if err := validateMinorKind(entity.Kind.GetMinor()); err != nil {
 		return err
 	}
@@ -342,6 +345,30 @@ func (repo *Neo4jRepository) HandleGraphRelationshipsCreate(ctx context.Context,
 
 	log.Printf("[neo4j_handler.HandleGraphRelationshipsCreate] Processing %d relationships for entity: %s", len(entity.Relationships), entity.Id)
 
+	// Validate relationship fields before querying Neo4j
+	for _, relationship := range entity.Relationships {
+		if relationship == nil || relationship.Id == "" {
+			log.Printf("[neo4j_handler.HandleGraphRelationshipsCreate] Relationship missing ID field")
+			return fmt.Errorf("relationship missing ID field")
+		}
+		if relationship.RelatedEntityId == "" {
+			log.Printf("[neo4j_handler.HandleGraphRelationshipsCreate] Missing RelatedEntityId for relationship creation")
+			return fmt.Errorf("missing RelatedEntityId for relationship %s. Required for creation", relationship.Id)
+		}
+		if relationship.Name == "" {
+			log.Printf("[neo4j_handler.HandleGraphRelationshipsCreate] Missing Name for relationship creation")
+			return fmt.Errorf("missing Name for relationship %s. Required for creation", relationship.Id)
+		}
+		if err := validateCypherName(relationship.Name); err != nil {
+			log.Printf("[neo4j_handler.HandleGraphRelationshipsCreate] Invalid Name for relationship %s: %v", relationship.Id, err)
+			return fmt.Errorf("invalid Name for relationship %s: %w", relationship.Id, err)
+		}
+		if relationship.StartTime == "" {
+			log.Printf("[neo4j_handler.HandleGraphRelationshipsCreate] Missing StartTime for relationship creation")
+			return fmt.Errorf("missing StartTime for relationship %s. Required for creation", relationship.Id)
+		}
+	}
+
 	// First verify the parent entity exists
 	parentEntity, err := repo.ReadGraphEntity(ctx, entity.Id)
 	if err != nil || parentEntity == nil {
@@ -351,25 +378,6 @@ func (repo *Neo4jRepository) HandleGraphRelationshipsCreate(ctx context.Context,
 
 	// Process all child entities
 	for _, relationship := range entity.Relationships {
-		if relationship == nil || relationship.Id == "" {
-			log.Printf("[neo4j_handler.HandleGraphRelationshipsUpdate] Relationship missing ID field")
-			return fmt.Errorf("relationship missing ID field")
-		}
-
-		// Validate required fields for creation
-		if relationship.RelatedEntityId == "" {
-			log.Printf("[neo4j_handler.HandleGraphRelationshipsUpdate] Missing RelatedEntityId for relationship creation")
-			return fmt.Errorf("missing RelatedEntityId for relationship %s. Required for creation", relationship.Id)
-		}
-		if relationship.Name == "" {
-			log.Printf("[neo4j_handler.HandleGraphRelationshipsUpdate] Missing Name for relationship creation")
-			return fmt.Errorf("missing Name for relationship %s. Required for creation", relationship.Id)
-		}
-		if relationship.StartTime == "" {
-			log.Printf("[neo4j_handler.HandleGraphRelationshipsUpdate] Missing StartTime for relationship creation")
-			return fmt.Errorf("missing StartTime for relationship %s. Required for creation", relationship.Id)
-		}
-
 		// Check if the child entity exists
 		childEntityMap, err := repo.ReadGraphEntity(ctx, relationship.RelatedEntityId)
 		if err != nil || childEntityMap == nil {
@@ -403,6 +411,20 @@ func (repo *Neo4jRepository) HandleGraphRelationshipsUpdate(ctx context.Context,
 	}
 
 	log.Printf("[neo4j_handler.HandleGraphRelationshipsUpdate] Processing %d relationships for entity: %s", len(entity.Relationships), entity.Id)
+
+	// Validate relationship fields before querying Neo4j
+	for _, relationship := range entity.Relationships {
+		if relationship == nil || relationship.Id == "" {
+			log.Printf("[neo4j_handler.HandleGraphRelationshipsUpdate] Relationship missing ID field")
+			return fmt.Errorf("relationship missing ID field")
+		}
+		if relationship.Name != "" {
+			if err := validateCypherName(relationship.Name); err != nil {
+				log.Printf("[neo4j_handler.HandleGraphRelationshipsUpdate] Invalid Name for relationship %s: %v", relationship.Id, err)
+				return fmt.Errorf("invalid Name for relationship %s: %w", relationship.Id, err)
+			}
+		}
+	}
 
 	// First verify the parent entity exists
 	parentEntity, err := repo.ReadGraphEntity(ctx, entity.Id)
@@ -481,6 +503,10 @@ func (repo *Neo4jRepository) HandleGraphRelationshipsUpdate(ctx context.Context,
 				log.Printf("[neo4j_handler.HandleGraphRelationshipsUpdate] Missing Name for relationship creation")
 				return fmt.Errorf("missing Name for relationship %s. Required for creation", relationship.Id)
 			}
+			if err := validateCypherName(relationship.Name); err != nil {
+				log.Printf("[neo4j_handler.HandleGraphRelationshipsUpdate] Invalid Name for relationship %s: %v", relationship.Id, err)
+				return fmt.Errorf("invalid Name for relationship %s: %w", relationship.Id, err)
+			}
 			if relationship.StartTime == "" {
 				log.Printf("[neo4j_handler.HandleGraphRelationshipsUpdate] Missing StartTime for relationship creation")
 				return fmt.Errorf("missing StartTime for relationship %s. Required for creation", relationship.Id)
@@ -513,6 +539,19 @@ func (repo *Neo4jRepository) HandleGraphRelationshipsUpdate(ctx context.Context,
 func (repo *Neo4jRepository) HandleGraphEntityFilter(ctx context.Context, req *pb.ReadEntityRequest) ([]map[string]interface{}, error) {
 	if req == nil || req.Entity == nil {
 		return nil, fmt.Errorf("invalid request: ReadEntityRequest or Entity is nil")
+	}
+
+	if req.Entity.Id == "" {
+		if req.Entity.Kind == nil || req.Entity.Kind.Major == "" {
+			return nil, fmt.Errorf("kind.Major is required")
+		}
+		if err := validateCypherName(req.Entity.Kind.Major); err != nil {
+			return nil, fmt.Errorf("invalid kind.Major: %w", err)
+		}
+	} else if req.Entity.Kind != nil && req.Entity.Kind.Major != "" {
+		if err := validateCypherName(req.Entity.Kind.Major); err != nil {
+			return nil, fmt.Errorf("invalid kind.Major: %w", err)
+		}
 	}
 
 	// Extract filters from the request

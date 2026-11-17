@@ -1538,3 +1538,186 @@ func TestInvalidMinorKindIsRejected(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateCypherName(t *testing.T) {
+	testCases := []struct {
+		name    string
+		input   string
+		wantErr bool
+	}{
+		// Valid cases
+		{"standard PascalCase label", "Person", false},
+		{"uppercase relationship", "KNOWS", false},
+		{"snake_case relationship", "reports_to", false},
+		{"alphanumeric with underscore", "Region_123", false},
+		{"leading underscore", "_InternalType", false},
+		{"single letter", "A", false},
+		{"complex valid relationship", "IS_MEMBER_OF_2", false},
+
+		// Invalid cases - empty & whitespace
+		{"empty string", "", true},
+		{"single space", " ", true},
+		{"multiple spaces", "   ", true},
+		{"leading space", " Person", true},
+		{"trailing space", "Person ", true},
+		{"space in label", "Region Test", true},
+		{"space in relationship", "HAS CHILD", true},
+		{"tab character", "Person\t", true},
+		{"newline character", "Person\n", true},
+
+		// Invalid cases - numbers & special characters
+		{"leading digit", "1Person", true},
+		{"leading digit in rel", "0KNOWS", true},
+		{"hyphen in label", "Region-Level", true},
+		{"hyphen in relationship", "has-child", true},
+		{"colon", "Person:Admin", true},
+		{"parenthesis closing", "Person)", true},
+		{"parenthesis opening", "Person(", true},
+		{"curly brace closing", "Person}", true},
+		{"curly brace opening", "Person{", true},
+		{"backtick", "Person`", true},
+		{"semicolon", "Person; DELETE", true},
+		{"cypher injection attempt", "Region) DETACH DELETE e //", true},
+		{"comment symbols", "Person//comment", true},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateCypherName(tc.input)
+			if tc.wantErr {
+				assert.Error(t, err, "Expected error for cypher name %q", tc.input)
+			} else {
+				assert.NoError(t, err, "Expected valid for cypher name %q", tc.input)
+			}
+		})
+	}
+}
+
+func TestValidateGraphEntityCreation_CypherValidation(t *testing.T) {
+	name, err := anypb.New(&wrapperspb.StringValue{Value: "Colombo"})
+	assert.NoError(t, err)
+
+	testCases := []struct {
+		name  string
+		major string
+		valid bool
+	}{
+		{"valid major", "Region", true},
+		{"valid major with underscore", "Country_Region", true},
+		{"invalid major with space", "Region Test", false},
+		{"invalid major leading digit", "1Region", false},
+		{"invalid major with hyphen", "Region-1", false},
+		{"invalid major cypher injection", "Region) DETACH DELETE e //", false},
+		{"invalid major backtick", "Region`", false},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			entity := &pb.Entity{
+				Id:      "validate-cypher-entity",
+				Kind:    &pb.Kind{Major: tc.major, Minor: "country-level-2"},
+				Name:    &pb.TimeBasedValue{StartTime: "2025-01-01T00:00:00Z", Value: name},
+				Created: "2025-01-01T00:00:00Z",
+			}
+			err := validateGraphEntityCreation(entity)
+			if tc.valid {
+				assert.NoError(t, err, "Expected valid entity creation for major %q", tc.major)
+			} else {
+				assert.Error(t, err, "Expected error for major %q", tc.major)
+			}
+		})
+	}
+}
+
+func TestCypherValidation_Units(t *testing.T) {
+	ctx := context.Background()
+	repo := &Neo4jRepository{}
+
+	invalidNames := []string{
+		"Invalid Name",
+		"123Invalid",
+		"rel-name",
+		"rel)",
+		"rel}",
+		"rel`",
+		"rel:type",
+		"rel\nname",
+	}
+
+	for _, invalid := range invalidNames {
+		t.Run("CreateGraphEntity rejects "+invalid, func(t *testing.T) {
+			_, err := repo.CreateGraphEntity(ctx, &pb.Kind{Major: invalid, Minor: "valid"}, map[string]interface{}{
+				"Id":      "test-id",
+				"Name":    "Test",
+				"Created": "2025-01-01T00:00:00Z",
+			})
+			assert.Error(t, err)
+			assert.Contains(t, err.Error(), "invalid 'Kind.Major'")
+		})
+
+		t.Run("FilterEntities rejects "+invalid, func(t *testing.T) {
+			_, err := repo.FilterEntities(ctx, &pb.Kind{Major: invalid, Minor: "valid"}, map[string]interface{}{})
+			assert.Error(t, err)
+			assert.Contains(t, err.Error(), "invalid kind.Major")
+		})
+
+		t.Run("CreateRelationship rejects "+invalid, func(t *testing.T) {
+			_, err := repo.CreateRelationship(ctx, "entity-1", &pb.Relationship{
+				Id:              "rel-1",
+				Name:            invalid,
+				RelatedEntityId: "entity-2",
+				StartTime:       "2025-01-01T00:00:00Z",
+			})
+			assert.Error(t, err)
+			assert.Contains(t, err.Error(), "invalid 'rel.Name'")
+		})
+
+		t.Run("ReadRelatedGraphEntityIds rejects "+invalid, func(t *testing.T) {
+			_, err := repo.ReadRelatedGraphEntityIds(ctx, "entity-1", invalid, "2025-01-01T00:00:00Z")
+			assert.Error(t, err)
+			assert.Contains(t, err.Error(), "invalid relationship")
+		})
+
+		t.Run("HandleGraphEntityFilter rejects "+invalid, func(t *testing.T) {
+			_, err := repo.HandleGraphEntityFilter(ctx, &pb.ReadEntityRequest{
+				Entity: &pb.Entity{
+					Kind: &pb.Kind{Major: invalid, Minor: "valid"},
+				},
+			})
+			assert.Error(t, err)
+			assert.Contains(t, err.Error(), "invalid kind.Major")
+		})
+
+		t.Run("HandleGraphRelationshipsCreate rejects "+invalid, func(t *testing.T) {
+			err := repo.HandleGraphRelationshipsCreate(ctx, &pb.Entity{
+				Id: "parent-id",
+				Relationships: map[string]*pb.Relationship{
+					"rel-1": {
+						Id:              "rel-1",
+						Name:            invalid,
+						RelatedEntityId: "child-id",
+						StartTime:       "2025-01-01T00:00:00Z",
+					},
+				},
+			})
+			assert.Error(t, err)
+			assert.Contains(t, err.Error(), "invalid Name for relationship")
+		})
+
+		t.Run("HandleGraphRelationshipsUpdate rejects "+invalid, func(t *testing.T) {
+			err := repo.HandleGraphRelationshipsUpdate(ctx, &pb.Entity{
+				Id: "parent-id",
+				Relationships: map[string]*pb.Relationship{
+					"rel-1": {
+						Id:              "rel-1",
+						Name:            invalid,
+						RelatedEntityId: "child-id",
+						StartTime:       "2025-01-01T00:00:00Z",
+					},
+				},
+			})
+			assert.Error(t, err)
+			assert.Contains(t, err.Error(), "invalid Name for relationship")
+		})
+	}
+}

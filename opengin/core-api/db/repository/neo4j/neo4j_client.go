@@ -76,6 +76,22 @@ func validateMinorKind(minor string) error {
 	return nil
 }
 
+var cypherNameRegex = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// validateCypherName checks that a node label (Kind.Major) or relationship type (Name)
+// is a valid, safe Cypher identifier matching ^[A-Za-z_][A-Za-z0-9_]*$.
+// It rejects empty strings, leading digits, whitespace, and special characters to prevent
+// Cypher syntax errors and query injection.
+func validateCypherName(name string) error {
+	if name == "" {
+		return fmt.Errorf("name cannot be empty")
+	}
+	if !cypherNameRegex.MatchString(name) {
+		return fmt.Errorf("invalid Cypher identifier %q: must match ^[A-Za-z_][A-Za-z0-9_]*$", name)
+	}
+	return nil
+}
+
 // CreateGraphEntity checks if an entity exists and creates it if it doesn't
 func (r *Neo4jRepository) CreateGraphEntity(ctx context.Context, kind *pb.Kind, entityMap map[string]interface{}) (map[string]interface{}, error) {
 	// Validate the kind parameter
@@ -84,6 +100,11 @@ func (r *Neo4jRepository) CreateGraphEntity(ctx context.Context, kind *pb.Kind, 
 		return nil, fmt.Errorf("[neo4j_client.CreateGraphEntity] missing or invalid 'Kind.Major' field")
 	} else {
 		log.Printf("[neo4j_client.CreateGraphEntity] Kind.Major: %v", kind.Major)
+	}
+
+	if err := validateCypherName(kind.Major); err != nil {
+		log.Printf("[neo4j_client.CreateGraphEntity] invalid 'Kind.Major': %v", err)
+		return nil, fmt.Errorf("[neo4j_client.CreateGraphEntity] invalid 'Kind.Major': %w", err)
 	}
 
 	if err := validateMinorKind(kind.Minor); err != nil {
@@ -129,7 +150,7 @@ func (r *Neo4jRepository) CreateGraphEntity(ctx context.Context, kind *pb.Kind, 
 	defer session.Close(ctx)
 
 	// Check if the node already exists
-	existsQuery := `MATCH (e:` + kind.Major + ` {Id: $Id}) RETURN e`
+	existsQuery := `MATCH (e:` + "`" + kind.Major + "`" + ` {Id: $Id}) RETURN e`
 	result, err := session.Run(ctx, existsQuery, map[string]interface{}{"Id": id})
 	if err != nil {
 		log.Printf("[neo4j_client.CreateGraphEntity] error checking if entity exists: %v", err)
@@ -147,7 +168,7 @@ func (r *Neo4jRepository) CreateGraphEntity(ctx context.Context, kind *pb.Kind, 
 	}
 
 	// Create the node
-	createQuery := `CREATE (e:` + kind.Major + ` {Id: $Id, Name: $Name, Created: datetime($Created), MinorKind: $MinorKind`
+	createQuery := `CREATE (e:` + "`" + kind.Major + "`" + ` {Id: $Id, Name: $Name, Created: datetime($Created), MinorKind: $MinorKind`
 	if terminated != nil {
 		createQuery += `, Terminated: datetime($Terminated)`
 	}
@@ -217,6 +238,15 @@ func (r *Neo4jRepository) CreateGraphEntity(ctx context.Context, kind *pb.Kind, 
 
 // CreateRelationship creates a relationship between two entities
 func (r *Neo4jRepository) CreateRelationship(ctx context.Context, entityID string, rel *pb.Relationship) (map[string]interface{}, error) {
+	if rel == nil || rel.Name == "" {
+		log.Printf("[neo4j_client.CreateRelationship] missing or invalid 'rel.Name' field")
+		return nil, fmt.Errorf("[neo4j_client.CreateRelationship] missing or invalid 'rel.Name' field")
+	}
+	if err := validateCypherName(rel.Name); err != nil {
+		log.Printf("[neo4j_client.CreateRelationship] invalid 'rel.Name': %v", err)
+		return nil, fmt.Errorf("[neo4j_client.CreateRelationship] invalid 'rel.Name': %w", err)
+	}
+
 	session := r.getSession(ctx)
 	defer session.Close(ctx)
 
@@ -260,7 +290,7 @@ func (r *Neo4jRepository) CreateRelationship(ctx context.Context, entityID strin
 	}
 
 	createQuery := `MATCH (p {Id: $parentID}), (c {Id: $childID})
-					CREATE (p)-[r:` + rel.Name + ` {Id: $relationshipID, Created: datetime($startDate)`
+					CREATE (p)-[r:` + "`" + rel.Name + "`" + ` {Id: $relationshipID, Created: datetime($startDate)`
 
 	if rel.EndTime != "" {
 		createQuery += `, Terminated: datetime($endDate)`
@@ -372,12 +402,19 @@ func (r *Neo4jRepository) ReadRelatedGraphEntityIds(ctx context.Context, entityI
 	if entityID == "" {
 		return nil, fmt.Errorf("entity Id cannot be empty")
 	}
+	if relationship == "" {
+		return nil, fmt.Errorf("relationship cannot be empty")
+	}
+	if err := validateCypherName(relationship); err != nil {
+		log.Printf("[neo4j_client.ReadRelatedGraphEntityIds] invalid relationship: %v", err)
+		return nil, fmt.Errorf("invalid relationship: %w", err)
+	}
 
 	session := r.getSession(ctx)
 	defer session.Close(ctx)
 
 	query := fmt.Sprintf(`
-        MATCH (e {Id: $entityID})-[r:%s]->(related)
+        MATCH (e {Id: $entityID})-[r:`+"`%s`"+`]->(related)
         WHERE r.Created <= datetime($ts) AND (r.Terminated IS NULL OR r.Terminated > datetime($ts))
         RETURN r.Id AS relationshipID, r.Created AS startTime, r.Terminated AS endTime, type(r) AS name, related.Id AS relatedEntityId
     `, relationship)
@@ -856,6 +893,13 @@ func (r *Neo4jRepository) DeleteGraphEntity(ctx context.Context, entityID string
 }
 
 func (r *Neo4jRepository) FilterEntities(ctx context.Context, kind *pb.Kind, filters map[string]interface{}) ([]map[string]interface{}, error) {
+	if kind != nil && kind.Major != "" {
+		if err := validateCypherName(kind.Major); err != nil {
+			log.Printf("[neo4j_client.FilterEntities] invalid kind.Major: %v", err)
+			return nil, fmt.Errorf("[neo4j_client.FilterEntities] invalid kind.Major: %w", err)
+		}
+	}
+
 	// Open a session
 	session := r.getSession(ctx)
 	defer session.Close(ctx)
@@ -881,9 +925,13 @@ func (r *Neo4jRepository) FilterEntities(ctx context.Context, kind *pb.Kind, fil
 		if kind == nil || kind.Major == "" {
 			return nil, fmt.Errorf("kind.Major is required")
 		}
+		if err := validateCypherName(kind.Major); err != nil {
+			log.Printf("[neo4j_client.FilterEntities] invalid kind.Major: %v", err)
+			return nil, fmt.Errorf("[neo4j_client.FilterEntities] invalid kind.Major: %w", err)
+		}
 
 		// Start building the Cypher query
-		query = `MATCH (e:` + kind.Major + `) WHERE 1=1 ` // Use kind.Major as the label
+		query = `MATCH (e:` + "`" + kind.Major + "`" + `) WHERE 1=1 ` // Use kind.Major as the label
 		params = map[string]interface{}{}
 
 		// Add MinorKind filter if provided.
